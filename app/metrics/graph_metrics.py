@@ -18,6 +18,12 @@ def compute_graph_metrics(graph: nx.DiGraph) -> dict[str, dict]:
     except Exception:
         pagerank = {node: 0.0 for node in graph.nodes}
 
+    # Eigenvector Centrality using the robust NumPy solver
+    try:
+        eigenvector = nx.eigenvector_centrality_numpy(graph)
+    except Exception:
+        eigenvector = {node: 0.0 for node in graph.nodes}
+
     # 2. Community Detection (Louvain)
     # Exclude external 'unresolved' nodes to not skew internal module communities
     internal_subgraph = graph.subgraph([n for n in graph.nodes if not n.startswith("unresolved:")])
@@ -44,6 +50,7 @@ def compute_graph_metrics(graph: nx.DiGraph) -> dict[str, dict]:
         node: {
             "betweenness_centrality": round(betweenness.get(node, 0.0), 6),
             "pagerank": round(pagerank.get(node, 0.0), 6),
+            "eigenvector_centrality": round(eigenvector.get(node, 0.0), 6),
             "community_id": community_map.get(node),
             "blast_radius": blast_radius.get(node, 0),
         }

@@ -17,6 +17,7 @@ class MethodMetrics(BaseModel):
     # Phase 2+ fields (None until computed)
     betweenness_centrality: float | None = None
     pagerank: float | None = None
+    eigenvector_centrality: float | None = None
     community_id: int | None = None
     blast_radius: int | None = None
 
