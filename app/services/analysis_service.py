@@ -8,7 +8,7 @@ from ..analysis.call_resolver import CallResolver
 from ..analysis.graph_builder import GraphBuilder
 from ..metrics.basic_metrics import compute_basic_metrics
 from ..models.analysis_result import AnalysisResult, AnalysisMeta
-from ..storage.sqlite_storage import SqliteStorage
+from ..storage.factory import get_storage
 
 
 class AnalysisService:
@@ -17,7 +17,7 @@ class AnalysisService:
         self.data_directory = data_directory
         self.oscar_version = oscar_version
         self.max_file_size_kb = max_file_size_kb
-        self.storage = SqliteStorage(data_directory)
+        self.storage = get_storage()
 
     def analyze(self, project_path: str, project_slug: str, exclude_tests: bool = False) -> AnalysisResult:
         """

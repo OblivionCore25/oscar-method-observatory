@@ -10,3 +10,4 @@ cdlib==0.3.0
 python-louvain==0.16
 sqlalchemy==2.0.38
 alembic==1.14.1
+psycopg2-binary>=2.9.9

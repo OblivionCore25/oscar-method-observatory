@@ -9,6 +9,8 @@ class Settings(BaseSettings):
         default=500,
         description="Skip Python source files larger than this (usually generated code)",
     )
+    storage_mode: str = Field(default="sqlite", description="'sqlite' or 'postgres'")
+    database_url: str = Field(default="", description="PostgreSQL connection string")
 
     model_config = {
         "env_prefix": "METHOD_OBS_",

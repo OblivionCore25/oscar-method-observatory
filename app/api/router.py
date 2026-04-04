@@ -65,6 +65,125 @@ async def analyze_project(request: AnalyzeRequest, service: AnalysisService = De
     )
 
 
+class IngestResponse(BaseModel):
+    project_slug: str
+    message: str
+    is_meta_package: bool = False
+    resolved_core_slug: str | None = None
+    meta_dependencies: list[str] = []
+
+
+@router.post("/ingest/{ecosystem}/{package_name}", response_model=IngestResponse)
+async def auto_ingest_package(
+    ecosystem: str,
+    package_name: str,
+    service: AnalysisService = Depends(get_service)
+):
+    """
+    Downloads package source code (if PyPI) and executes AST analysis, 
+    deleting the source files immediately after success.
+    """
+    if ecosystem.lower() == "npm":
+        # Graceful placeholder for future NPM AST parsing
+        return IngestResponse(
+            project_slug=package_name,
+            message="AST Parsing for NPM is not yet implemented. Returning placeholder response."
+        )
+        
+    if ecosystem.lower() != "pypi":
+        raise HTTPException(status_code=400, detail="Only PyPI ecosystem is currently supported for auto-ingestion.")
+        
+    import shutil
+    from app.config import settings
+    from app.ingestion.pypi_downloader import download_and_extract_pypi
+    
+    download_base_dir = Path(settings.data_directory) / "downloads"
+    
+    try:
+        source_root = download_and_extract_pypi(package_name, download_base_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch PyPI package: {str(e)}")
+        
+    try:
+        # We pass the extracted dir to the service
+        # The service will overwrite any existing run in postgres automatically
+        result = service.analyze(
+            project_path=str(source_root),
+            project_slug=package_name,
+            exclude_tests=True
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+    finally:
+        # Cleanup source code as requested
+        target_dir = source_root
+        # Handle the case where source_root was inside a parent extraction dir 
+        # (e.g. downloads/flask_3.0.0/flask-3.0.0/). We want to clean the parent.
+        if target_dir.parent == download_base_dir:
+            shutil.rmtree(target_dir, ignore_errors=True)
+        else:
+            shutil.rmtree(target_dir.parent, ignore_errors=True)
+
+    is_meta_package = False
+    resolved_core_slug = None
+    meta_dependencies = []
+
+    # Meta-Package Ast Redirection Fallback
+    if result.meta.method_count == 0:
+        import httpx
+        import re
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                r = client.get(f"https://pypi.org/pypi/{package_name}/json")
+                if r.status_code == 200:
+                    data = r.json()
+                    reqs = data.get("info", {}).get("requires_dist") or []
+                    
+                    parsed_reqs = []
+                    for req in reqs:
+                        match = re.search(r'^([a-zA-Z0-9_\-]+)', req)
+                        if match:
+                            parsed_reqs.append(match.group(1).lower())
+                            
+                    if parsed_reqs:
+                        is_meta_package = True
+                        # Uniquify maintaining order
+                        meta_dependencies = list(dict.fromkeys(parsed_reqs))
+                        
+                        # Heuristic Core Matching
+                        candidates = [dep for dep in meta_dependencies if dep.startswith(package_name.lower()) and len(dep) > len(package_name)]
+                        if candidates:
+                            resolved_core_slug = sorted(candidates, key=len)[0]
+                            
+                            # Transitive Deep Ingest
+                            source_root_core = download_and_extract_pypi(resolved_core_slug, download_base_dir)
+                            try:
+                                service.analyze(
+                                    project_path=str(source_root_core),
+                                    project_slug=resolved_core_slug,
+                                    exclude_tests=True
+                                )
+                            except Exception:
+                                pass # Provide partial degraded if transit fails
+                            finally:
+                                if source_root_core.parent == download_base_dir:
+                                    shutil.rmtree(source_root_core, ignore_errors=True)
+                                else:
+                                    shutil.rmtree(source_root_core.parent, ignore_errors=True)
+                                    
+        except Exception as e:
+            print(f"Meta-Package check failed: {e}")
+
+    return IngestResponse(
+        project_slug=package_name,
+        message=f"Successfully analyzed PyPI package '{package_name}'.",
+        is_meta_package=is_meta_package,
+        resolved_core_slug=resolved_core_slug,
+        meta_dependencies=meta_dependencies
+    )
+
+
+
 @router.get("/projects", response_model=list[str])
 async def list_projects(service: AnalysisService = Depends(get_service)):
     """List all previously analyzed projects."""
