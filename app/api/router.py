@@ -338,6 +338,76 @@ async def get_blast_radius(
     }
 
 
+@router.get("/{project_slug}/method/{method_id:path}/neighborhood", response_model=dict)
+async def get_neighborhood(
+    project_slug: str,
+    method_id: str,
+    degrees: int = 2,
+    service: AnalysisService = Depends(get_service),
+):
+    """
+    Return the local N-degree neighborhood of a method (both callers and callees).
+    """
+    result = service.load(project_slug)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Project '{project_slug}' not found")
+
+    import networkx as nx
+    G = nx.DiGraph()
+    for c in result.calls:
+        if c.confidence > 0:
+            G.add_edge(c.source_id, c.target_id, **c.model_dump())
+
+    if method_id not in G:
+        G.add_node(method_id)
+
+    downstream = set([method_id])
+    if method_id in G:
+        down_queue = [(method_id, 0)]
+        while down_queue:
+            node, depth = down_queue.pop(0)
+            if depth < degrees:
+                for target in G.successors(node):
+                    if target not in downstream:
+                        downstream.add(target)
+                        down_queue.append((target, depth + 1))
+                        
+    upstream = set([method_id])
+    if method_id in G:
+        up_queue = [(method_id, 0)]
+        while up_queue:
+            node, depth = up_queue.pop(0)
+            if depth < degrees:
+                for source in G.predecessors(node):
+                    if source not in upstream:
+                        upstream.add(source)
+                        up_queue.append((source, depth + 1))
+                        
+    neighborhood = downstream.union(upstream)
+    
+    method_map = {m.id: m.model_dump() for m in result.methods}
+    metrics_map = {m.method_id: m.model_dump() for m in result.metrics}
+
+    nodes = []
+    edges = []
+    
+    for n in neighborhood:
+        if n in method_map:
+            nodes.append({**method_map[n], **metrics_map.get(n, {})})
+            
+    subgraph = G.subgraph(neighborhood)
+    for u, v, data in subgraph.edges(data=True):
+        edges.append(data)
+
+    return {
+        "root": method_id,
+        "node_count": len(nodes),
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+
 @router.get("/{project_slug}/method/{method_id:path}", response_model=MethodDetailResponse)
 async def get_method_detail(
     project_slug: str,
