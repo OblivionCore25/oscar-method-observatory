@@ -20,6 +20,13 @@ class AnalyzeSummaryResponse(BaseModel):
     meta: AnalysisMeta
     top_risk: list[MethodMetrics]  # Top 10 by bottleneck score
 
+class IngestResponse(BaseModel):
+    project_slug: str
+    message: str
+    is_meta_package: bool = False
+    resolved_core_slug: str | None = None
+    meta_dependencies: list[str] = []
+
 
 class MethodDetailResponse(BaseModel):
     method: dict                   # Full MethodNode serialized
@@ -58,19 +65,8 @@ async def analyze_project(request: AnalyzeRequest, service: AnalysisService = De
         raise HTTPException(status_code=500, detail=str(e))
 
     top_risk = sorted(result.metrics, key=lambda m: m.bottleneck_score, reverse=True)[:10]
-    return AnalyzeSummaryResponse(
-        project_slug=request.project_slug,
-        meta=result.meta,
-        top_risk=top_risk,
-    )
+    return AnalyzeSummaryResponse(project_slug=result.meta.project_slug, meta=result.meta, top_risk=top_risk)
 
-
-class IngestResponse(BaseModel):
-    project_slug: str
-    message: str
-    is_meta_package: bool = False
-    resolved_core_slug: str | None = None
-    meta_dependencies: list[str] = []
 
 
 @router.post("/ingest/{ecosystem}/{package_name}", response_model=IngestResponse)
@@ -110,6 +106,7 @@ async def auto_ingest_package(
         result = service.analyze(
             project_path=str(source_root),
             project_slug=package_name,
+            ecosystem=ecosystem.lower(),
             exclude_tests=True
         )
     except Exception as e:
