@@ -12,6 +12,11 @@ class MethodKind(str, Enum):
     ASYNC_FUNCTION = "async_function"
     ASYNC_METHOD = "async_method"
     LAMBDA = "lambda"              # inline lambda (limited support)
+    ARROW_FUNCTION = "arrow_function"
+    GENERATOR = "generator"
+    CONSTRUCTOR = "constructor"    # JS class constructor()
+    GETTER = "getter"              # get prop() {}
+    SETTER = "setter"              # set prop() {}
 
 
 class MethodNode(BaseModel):

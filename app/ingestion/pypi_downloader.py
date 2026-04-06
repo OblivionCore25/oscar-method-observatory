@@ -1,5 +1,6 @@
 import httpx
 import tarfile
+import zipfile
 import shutil
 from pathlib import Path
 from tempfile import TemporaryFile
@@ -21,14 +22,17 @@ def download_and_extract_pypi(package_name: str, download_dir: Path) -> Path:
         latest_version = data["info"]["version"]
         urls = data["releases"].get(latest_version, [])
         
+        bdist_url = None
         sdist_url = None
         for u in urls:
-            if u["packagetype"] == "sdist" and u["url"].endswith(".tar.gz"):
+            if u["packagetype"] == "bdist_wheel" and u["url"].endswith(".whl"):
+                bdist_url = u["url"]
+            elif u["packagetype"] == "sdist" and u["url"].endswith(".tar.gz"):
                 sdist_url = u["url"]
-                break
                 
-        if not sdist_url:
-            raise ValueError(f"No source distribution (.tar.gz) found for {package_name} v{latest_version}")
+        target_url = bdist_url or sdist_url
+        if not target_url:
+            raise ValueError(f"No valid distribution (.whl or .tar.gz) found for {package_name} v{latest_version}")
 
         # Ensure download parent dir exists
         download_dir.mkdir(parents=True, exist_ok=True)
@@ -42,23 +46,22 @@ def download_and_extract_pypi(package_name: str, download_dir: Path) -> Path:
             
         target_dir.mkdir(parents=True)
         
-        print(f"Downloading {package_name} from {sdist_url}...")
+        print(f"Downloading {package_name} from {target_url}...")
         
         with TemporaryFile() as tf:
-            with client.stream("GET", sdist_url) as r:
+            with client.stream("GET", target_url) as r:
                 r.raise_for_status()
                 for chunk in r.iter_bytes():
                     tf.write(chunk)
             
             tf.seek(0)
             print(f"Extracting to {target_dir}...")
-            with tarfile.open(fileobj=tf, mode="r:gz") as tar:
-                # The tar usually contains a single top-level folder (e.g. requests-2.31.0/)
-                # extractall handles this fine, we just return the target_dir
-                
-                # To be safe from arbitrary paths in tarballs
-                # modern python (3.12+) supports filter='data'
-                tar.extractall(path=target_dir, filter='data')
+            if target_url.endswith(".whl"):
+                with zipfile.ZipFile(tf, "r") as z:
+                    z.extractall(target_dir)
+            else:
+                with tarfile.open(fileobj=tf, mode="r:gz") as tar:
+                    tar.extractall(path=target_dir, filter='data')
 
         # Find the actual source root inside the target_dir (e.g. target_dir/requests-2.31.0)
         # We assume there's one top-level directory extracted.

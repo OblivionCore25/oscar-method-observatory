@@ -166,7 +166,25 @@ class PgStorage:
                 metrics=metrics
             )
 
-    def list_projects(self) -> list[str]:
+    def list_projects(self) -> list[dict]:
         with self.SessionLocal() as session:
-            rows = session.execute(select(AnalysisRunModel.project_slug).distinct()).scalars().all()
-            return list(rows)
+            # PostgreSQL requires DISTINCT ON or GROUP BY for max/distinct with other columns.
+            # We'll use a simple DISTINCT (select project_slug) but to get meta_json we must group or query.
+            # For simplicity, let's fetch all runs and distinct in python, there aren't that many yet.
+            rows = session.execute(
+                select(AnalysisRunModel.project_slug, AnalysisRunModel.meta_json)
+                .order_by(AnalysisRunModel.id.desc())
+            ).all()
+            
+            seen = set()
+            out = []
+            for slug, meta_json in rows:
+                if slug in seen:
+                    continue
+                seen.add(slug)
+                meta = json.loads(meta_json)
+                if meta.get("method_count", 0) == 0:
+                    continue
+                ecosystem = "npm" if meta.get("analysis_approach") == "tree_sitter_static" else "pypi"
+                out.append({"slug": slug, "ecosystem": ecosystem})
+            return out

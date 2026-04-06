@@ -2,6 +2,7 @@ from pathlib import Path
 from ..models.analysis_result import AnalysisResult
 from ..storage.factory import get_storage
 from ..analysis.python_analyzer import PythonAnalyzer
+from ..analysis.javascript_analyzer import JavaScriptAnalyzer
 
 class UnsupportedEcosystemError(Exception):
     pass
@@ -17,7 +18,7 @@ class AnalysisService:
         # Register available analyzers
         self._analyzers = {
             "pypi": PythonAnalyzer(),
-            # Future: "npm": JavaScriptAnalyzer()
+            "npm": JavaScriptAnalyzer()
         }
 
     def analyze(self, project_path: str, project_slug: str, ecosystem: str = "pypi", exclude_tests: bool = False) -> AnalysisResult:
@@ -44,7 +45,9 @@ class AnalysisService:
         return result
 
     def load(self, project_slug: str) -> AnalysisResult | None:
-        return self.storage.load(project_slug)
+        import urllib.parse
+        normalized = urllib.parse.unquote(project_slug).replace("@", "").replace("/", "__")
+        return self.storage.load(normalized)
 
-    def list_projects(self) -> list[str]:
+    def list_projects(self) -> list[dict]:
         return self.storage.list_projects()

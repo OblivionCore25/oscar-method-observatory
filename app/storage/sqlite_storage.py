@@ -192,8 +192,17 @@ class SqliteStorage:
                 metrics=metrics
             )
 
-    def list_projects(self) -> list[str]:
+    def list_projects(self) -> list[dict]:
         with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute("SELECT DISTINCT project_slug FROM analysis_runs")
-            return [row[0] for row in cur.fetchall()]
+            cur.execute("SELECT project_slug, meta_json FROM analysis_runs GROUP BY project_slug")
+            
+            results = []
+            for row in cur.fetchall():
+                meta = json.loads(row["meta_json"])
+                if meta.get("method_count", 0) == 0:
+                    continue
+                ecosystem = "npm" if meta.get("analysis_approach") == "tree_sitter_static" else "pypi"
+                results.append({"slug": row["project_slug"], "ecosystem": ecosystem})
+            return results

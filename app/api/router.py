@@ -69,7 +69,7 @@ async def analyze_project(request: AnalyzeRequest, service: AnalysisService = De
 
 
 
-@router.post("/ingest/{ecosystem}/{package_name}", response_model=IngestResponse)
+@router.post("/ingest/{ecosystem}/{package_name:path}", response_model=IngestResponse)
 async def auto_ingest_package(
     ecosystem: str,
     package_name: str,
@@ -79,33 +79,39 @@ async def auto_ingest_package(
     Downloads package source code (if PyPI) and executes AST analysis, 
     deleting the source files immediately after success.
     """
-    if ecosystem.lower() == "npm":
-        # Graceful placeholder for future NPM AST parsing
-        return IngestResponse(
-            project_slug=package_name,
-            message="AST Parsing for NPM is not yet implemented. Returning placeholder response."
-        )
-        
-    if ecosystem.lower() != "pypi":
-        raise HTTPException(status_code=400, detail="Only PyPI ecosystem is currently supported for auto-ingestion.")
+    if ecosystem.lower() not in ("pypi", "npm"):
+        raise HTTPException(status_code=400, detail="Only PyPI and NPM ecosystems are currently supported for auto-ingestion.")
         
     import shutil
+    import urllib.parse
     from app.config import settings
     from app.ingestion.pypi_downloader import download_and_extract_pypi
+    from app.ingestion.npm_downloader import download_and_extract_npm
     
     download_base_dir = Path(settings.data_directory) / "downloads"
     
+    # Check if package name is URL encoded (for scoped npm packages like %40babel%2Fcore)
+    # The API might receive it encoded or decoded depending on the caller.
+    # Safe to unquote it to get the real name e.g. @babel/core
+    decoded_package_name = urllib.parse.unquote(package_name)
+    
     try:
-        source_root = download_and_extract_pypi(package_name, download_base_dir)
+        if ecosystem.lower() == "npm":
+            source_root = download_and_extract_npm(decoded_package_name, download_base_dir)
+        else:
+            source_root = download_and_extract_pypi(decoded_package_name, download_base_dir)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch PyPI package: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch {ecosystem} package: {str(e)}")
         
     try:
         # We pass the extracted dir to the service
         # The service will overwrite any existing run in postgres automatically
+        # For scoped packages, we normalize the slug because it's used in URLs and DB keys
+        normalized_slug = decoded_package_name.replace("@", "").replace("/", "__")
+        
         result = service.analyze(
             project_path=str(source_root),
-            project_slug=package_name,
+            project_slug=normalized_slug,
             ecosystem=ecosystem.lower(),
             exclude_tests=True
         )
@@ -172,7 +178,7 @@ async def auto_ingest_package(
             print(f"Meta-Package check failed: {e}")
 
     return IngestResponse(
-        project_slug=package_name,
+        project_slug=normalized_slug,
         message=f"Successfully analyzed PyPI package '{package_name}'.",
         is_meta_package=is_meta_package,
         resolved_core_slug=resolved_core_slug,
@@ -181,7 +187,7 @@ async def auto_ingest_package(
 
 
 
-@router.get("/projects", response_model=list[str])
+@router.get("/projects", response_model=list[dict])
 async def list_projects(service: AnalysisService = Depends(get_service)):
     """List all previously analyzed projects."""
     return service.list_projects()
