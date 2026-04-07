@@ -73,6 +73,7 @@ async def analyze_project(request: AnalyzeRequest, service: AnalysisService = De
 async def auto_ingest_package(
     ecosystem: str,
     package_name: str,
+    version: str | None = Query(default=None, description="Specific version to analyze. Defaults to the latest if not provided."),
     service: AnalysisService = Depends(get_service)
 ):
     """
@@ -99,7 +100,7 @@ async def auto_ingest_package(
         if ecosystem.lower() == "npm":
             source_root = download_and_extract_npm(decoded_package_name, download_base_dir)
         else:
-            source_root = download_and_extract_pypi(decoded_package_name, download_base_dir)
+            source_root = download_and_extract_pypi(decoded_package_name, download_base_dir, version=version)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch {ecosystem} package: {str(e)}")
         
