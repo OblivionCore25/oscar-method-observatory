@@ -4,6 +4,65 @@ import shutil
 from pathlib import Path
 from tempfile import TemporaryFile
 
+_GIT_HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "sr.ht")
+
+
+def _normalise_git_url(url: str) -> str | None:
+    """Convert various git URL formats to a plain HTTPS clone URL."""
+    if not url:
+        return None
+    url = url.strip().rstrip("/")
+    if url.startswith("git@"):
+        url = url.replace(":", "/", 1).replace("git@", "https://", 1)
+    if url.startswith("git+"):
+        url = url[4:]
+    if not any(host in url for host in _GIT_HOSTS):
+        return None
+        
+    import re
+    # Strip monorepo subdirectory paths like /tree/master/packages/foo
+    if "github.com" in url or "gitlab.com" in url:
+        url = re.sub(r'/(tree|blob)/.*$', '', url)
+        
+    if not url.endswith(".git"):
+        url = url + ".git"
+    return url
+
+
+def resolve_repo_url_npm(package_name: str) -> str | None:
+    """
+    Query the npm registry API and extract the source repository URL.
+    Returns a normalised HTTPS clone URL, or None if not found.
+    """
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(f"https://registry.npmjs.org/{package_name}")
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            latest = data.get("dist-tags", {}).get("latest")
+            if not latest:
+                return None
+            version_data = data.get("versions", {}).get(latest, {})
+            # Try version-level repository first (most specific), then package-level
+            for source in (version_data, data):
+                repo = source.get("repository")
+                if isinstance(repo, dict):
+                    url = _normalise_git_url(repo.get("url", ""))
+                    if url:
+                        return url
+                elif isinstance(repo, str):
+                    url = _normalise_git_url(repo)
+                    if url:
+                        return url
+            # Some packages put it in bugs.url or homepage as a fallback
+            homepage = _normalise_git_url(data.get("homepage", ""))
+            if homepage:
+                return homepage
+    except Exception:
+        pass
+    return None
+
 def download_and_extract_npm(package_name: str, download_dir: Path) -> Path:
     """
     Fetches the NPM JSON metadata, finds the latest source dist (.tgz),
@@ -50,7 +109,9 @@ def download_and_extract_npm(package_name: str, download_dir: Path) -> Path:
             
         target_dir.mkdir(parents=True)
         
-        print(f"Downloading {package_name} from {tarball_url}...")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Downloading {package_name} from {tarball_url}...")
         
         with TemporaryFile() as tf:
             with client.stream("GET", tarball_url) as r:
@@ -59,7 +120,7 @@ def download_and_extract_npm(package_name: str, download_dir: Path) -> Path:
                     tf.write(chunk)
             
             tf.seek(0)
-            print(f"Extracting to {target_dir}...")
+            logger.info(f"Extracting to {target_dir}...")
             with tarfile.open(fileobj=tf, mode="r:gz") as tar:
                 # `tar.extractall` with `filter='data'` (Python 3.12+) or just default
                 if hasattr(tarfile, 'data_filter'):

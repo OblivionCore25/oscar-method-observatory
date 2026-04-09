@@ -37,6 +37,9 @@ class AnalysisMeta(BaseModel):
     analysis_approach: str = "ast_static"
     # Completeness estimate: resolved_calls / total_calls
     resolution_rate: float = 0.0
+    # True when the package is pre-bundled into a single file (e.g. dist/index.js),
+    # meaning git churn metrics are file-level, not method-level.
+    is_bundled: bool = False
 
 
 class AnalysisResult(BaseModel):

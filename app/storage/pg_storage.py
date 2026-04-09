@@ -6,13 +6,17 @@ from ..models.analysis_result import AnalysisResult, AnalysisMeta, MethodMetrics
 from ..models.method_node import MethodNode, ClassNode, ModuleNode
 from ..models.call_edge import CallEdge, ImportEdge, InheritanceEdge
 
+from ..models.git_profile import GitRepoHealth, GitFileChurn, GitAnalysisResult
+
 from .models import (
     Base,
     AnalysisRunModel,
     MethodNodeModel,
     CallEdgeModel,
     MethodMetricsModel,
-    AuxiliaryDataModel
+    AuxiliaryDataModel,
+    GitRepoProfileModel,
+    GitFileChurnModel
 )
 
 class PgStorage:
@@ -188,3 +192,99 @@ class PgStorage:
                 ecosystem = "npm" if meta.get("analysis_approach") == "tree_sitter_static" else "pypi"
                 out.append({"slug": slug, "ecosystem": ecosystem})
             return out
+
+    def save_git_profile(self, result: GitAnalysisResult) -> None:
+        with self.SessionLocal() as session:
+            try:
+                session.execute(delete(GitRepoProfileModel).where(GitRepoProfileModel.project_slug == result.health.project_slug))
+                session.execute(delete(GitFileChurnModel).where(GitFileChurnModel.project_slug == result.health.project_slug))
+                session.commit()
+
+                h = result.health
+                profile = GitRepoProfileModel(
+                    project_slug=h.project_slug,
+                    repo_url=h.repo_url,
+                    analyzed_at=h.analyzed_at.isoformat(),
+                    total_commits=h.total_commits,
+                    total_contributors=h.total_contributors,
+                    active_contributors_90d=h.active_contributors_90d,
+                    bus_factor=h.bus_factor,
+                    first_commit_date=h.first_commit_date,
+                    last_commit_date=h.last_commit_date,
+                    days_since_last_commit=h.days_since_last_commit,
+                    analysis_window_days=h.analysis_window_days,
+                    commits_in_window=h.commits_in_window,
+                    monthly_commit_series=json.dumps(h.monthly_commit_series),
+                    top_contributors_json=json.dumps(h.top_contributors)
+                )
+                session.add(profile)
+                session.commit()
+
+                churn_models = []
+                for c in result.files:
+                    churn_models.append(
+                        GitFileChurnModel(
+                            profile_id=profile.id,
+                            project_slug=h.project_slug,
+                            file_path=c.file_path,
+                            commits=c.commits,
+                            author_count=c.author_count,
+                            last_modified=c.last_modified,
+                            top_authors_json=json.dumps(c.top_authors)
+                        )
+                    )
+                session.bulk_save_objects(churn_models)
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+
+    def load_git_profile(self, project_slug: str) -> GitRepoHealth | None:
+        with self.SessionLocal() as session:
+            profile = session.execute(
+                select(GitRepoProfileModel)
+                .where(GitRepoProfileModel.project_slug == project_slug)
+            ).scalar_one_or_none()
+            
+            if not profile:
+                return None
+                
+            from datetime import datetime
+            return GitRepoHealth(
+                project_slug=profile.project_slug,
+                repo_url=profile.repo_url,
+                analyzed_at=datetime.fromisoformat(profile.analyzed_at),
+                total_commits=profile.total_commits,
+                total_contributors=profile.total_contributors,
+                active_contributors_90d=profile.active_contributors_90d,
+                bus_factor=profile.bus_factor,
+                first_commit_date=profile.first_commit_date,
+                last_commit_date=profile.last_commit_date,
+                days_since_last_commit=profile.days_since_last_commit,
+                analysis_window_days=profile.analysis_window_days,
+                commits_in_window=profile.commits_in_window,
+                monthly_commit_series=json.loads(profile.monthly_commit_series or "[]"),
+                top_contributors=json.loads(profile.top_contributors_json or "[]")
+            )
+
+    def load_git_file_churn(self, project_slug: str) -> list[GitFileChurn]:
+        with self.SessionLocal() as session:
+            rows = session.execute(
+                select(GitFileChurnModel)
+                .where(GitFileChurnModel.project_slug == project_slug)
+            ).scalars().all()
+            
+            results = []
+            for row in rows:
+                results.append(GitFileChurn(
+                    file_path=row.file_path,
+                    commits=row.commits,
+                    author_count=row.author_count,
+                    last_modified=row.last_modified,
+                    top_authors=json.loads(row.top_authors_json or "[]")
+                ))
+            return results
+
+    def load_git_file_churn_map(self, project_slug: str) -> dict[str, GitFileChurn]:
+        churns = self.load_git_file_churn(project_slug)
+        return {c.file_path: c for c in churns}

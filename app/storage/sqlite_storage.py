@@ -4,6 +4,7 @@ from pathlib import Path
 from ..models.analysis_result import AnalysisResult, AnalysisMeta, MethodMetrics
 from ..models.method_node import MethodNode, ClassNode, ModuleNode, MethodKind
 from ..models.call_edge import CallEdge, ImportEdge, InheritanceEdge, CallType
+from ..models.git_profile import GitRepoHealth, GitFileChurn, GitAnalysisResult
 
 class SqliteStorage:
     """
@@ -206,3 +207,93 @@ class SqliteStorage:
                 ecosystem = "npm" if meta.get("analysis_approach") == "tree_sitter_static" else "pypi"
                 results.append({"slug": row["project_slug"], "ecosystem": ecosystem})
             return results
+
+    def save_git_profile(self, result: GitAnalysisResult) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            
+            cur.execute("DELETE FROM git_repo_profiles WHERE project_slug = ?", (result.health.project_slug,))
+            cur.execute("DELETE FROM git_file_churn WHERE project_slug = ?", (result.health.project_slug,))
+            
+            h = result.health
+            cur.execute(
+                """INSERT INTO git_repo_profiles (
+                    project_slug, repo_url, analyzed_at, total_commits, total_contributors,
+                    active_contributors_90d, bus_factor, first_commit_date, last_commit_date,
+                    days_since_last_commit, analysis_window_days, commits_in_window,
+                    monthly_commit_series, top_contributors_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    h.project_slug, h.repo_url, h.analyzed_at.isoformat(), h.total_commits,
+                    h.total_contributors, h.active_contributors_90d, h.bus_factor,
+                    h.first_commit_date, h.last_commit_date, h.days_since_last_commit,
+                    h.analysis_window_days, h.commits_in_window,
+                    json.dumps(h.monthly_commit_series), json.dumps(h.top_contributors)
+                )
+            )
+            profile_id = cur.lastrowid
+            
+            churn_data = []
+            for c in result.files:
+                churn_data.append((
+                    profile_id, h.project_slug, c.file_path, c.commits,
+                    c.author_count, c.last_modified, json.dumps(c.top_authors)
+                ))
+                
+            cur.executemany(
+                """INSERT INTO git_file_churn (
+                    profile_id, project_slug, file_path, commits, author_count,
+                    last_modified, top_authors_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                churn_data
+            )
+
+    def load_git_profile(self, project_slug: str) -> GitRepoHealth | None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM git_repo_profiles WHERE project_slug = ?", (project_slug,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            
+            from datetime import datetime
+            
+            return GitRepoHealth(
+                project_slug=row["project_slug"],
+                repo_url=row["repo_url"],
+                analyzed_at=datetime.fromisoformat(row["analyzed_at"]),
+                total_commits=row["total_commits"],
+                total_contributors=row["total_contributors"],
+                active_contributors_90d=row["active_contributors_90d"],
+                bus_factor=row["bus_factor"],
+                first_commit_date=row["first_commit_date"],
+                last_commit_date=row["last_commit_date"],
+                days_since_last_commit=row["days_since_last_commit"],
+                analysis_window_days=row["analysis_window_days"],
+                commits_in_window=row["commits_in_window"],
+                monthly_commit_series=json.loads(row["monthly_commit_series"] or "[]"),
+                top_contributors=json.loads(row["top_contributors_json"] or "[]")
+            )
+
+    def load_git_file_churn(self, project_slug: str) -> list[GitFileChurn]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM git_file_churn WHERE project_slug = ?", (project_slug,))
+            rows = cur.fetchall()
+            
+            results = []
+            for row in rows:
+                results.append(GitFileChurn(
+                    file_path=row["file_path"],
+                    commits=row["commits"],
+                    author_count=row["author_count"],
+                    last_modified=row["last_modified"],
+                    top_authors=json.loads(row["top_authors_json"] or "[]")
+                ))
+            return results
+
+    def load_git_file_churn_map(self, project_slug: str) -> dict[str, GitFileChurn]:
+        churns = self.load_git_file_churn(project_slug)
+        return {c.file_path: c for c in churns}

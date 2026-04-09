@@ -5,6 +5,67 @@ import shutil
 from pathlib import Path
 from tempfile import TemporaryFile
 
+# Ordered preference of project_url keys that tend to carry the source repo
+_PYPI_REPO_URL_KEYS = ["Source", "Repository", "Code", "GitHub", "Source Code", "Homepage"]
+_GIT_HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "sr.ht")
+
+
+def _normalise_git_url(url: str) -> str | None:
+    """Convert various git URL formats to a plain HTTPS clone URL."""
+    if not url:
+        return None
+    url = url.strip().rstrip("/")
+    # Convert SSH git@ URLs → https
+    if url.startswith("git@"):
+        url = url.replace(":", "/", 1).replace("git@", "https://", 1)
+    # Strip git+ prefix
+    if url.startswith("git+"):
+        url = url[4:]
+    # Must be from a known git host
+    if not any(host in url for host in _GIT_HOSTS):
+        return None
+    # Ensure .git suffix for cloning
+    if not url.endswith(".git"):
+        url = url + ".git"
+    return url
+
+
+def resolve_repo_url_pypi(package_name: str, version: str | None = None) -> str | None:
+    """
+    Query the PyPI JSON API and extract the source repository URL.
+    Returns a normalised HTTPS clone URL, or None if not found.
+    """
+    def _extract_from_data(data: dict) -> str | None:
+        project_urls: dict = data.get("info", {}).get("project_urls") or {}
+        for key in _PYPI_REPO_URL_KEYS:
+            url = _normalise_git_url(project_urls.get(key, ""))
+            if url:
+                return url
+        for url in project_urls.values():
+            norm = _normalise_git_url(url or "")
+            if norm:
+                return norm
+        return None    
+
+    candidates = []
+    if version:
+        candidates.append(f"https://pypi.org/pypi/{package_name}/{version}/json")
+    # Always include the unversioned endpoint as a fallback — old releases often lack project_urls
+    candidates.append(f"https://pypi.org/pypi/{package_name}/json")
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            for api_url in candidates:
+                resp = client.get(api_url)
+                if resp.status_code != 200:
+                    continue
+                result = _extract_from_data(resp.json())
+                if result:
+                    return result
+    except Exception:
+        pass
+    return None
+
 def download_and_extract_pypi(package_name: str, download_dir: Path, version: str | None = None) -> Path:
     """
     Fetches the PyPI JSON metadata, finds the source dist (.tar.gz) for the
@@ -53,7 +114,9 @@ def download_and_extract_pypi(package_name: str, download_dir: Path, version: st
             
         target_dir.mkdir(parents=True)
         
-        print(f"Downloading {package_name} v{resolved_version} from {target_url}...")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Downloading {package_name} v{resolved_version} from {target_url}...")
         
         with TemporaryFile() as tf:
             with client.stream("GET", target_url) as r:
@@ -62,7 +125,7 @@ def download_and_extract_pypi(package_name: str, download_dir: Path, version: st
                     tf.write(chunk)
             
             tf.seek(0)
-            print(f"Extracting to {target_dir}...")
+            logger.info(f"Extracting to {target_dir}...")
             if target_url.endswith(".whl"):
                 with zipfile.ZipFile(tf, "r") as z:
                     z.extractall(target_dir)

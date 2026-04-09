@@ -47,6 +47,13 @@ class MethodNode(BaseModel):
     loc: int = 0                   # Lines of code in body (non-blank, non-comment)
     complexity: int = 1            # Cyclomatic complexity (min 1)
 
+    # Temporal / Git
+    change_frequency: int = 0          # DEPRECATED: Use standalone GitRepoProfile. Commits touching this method's file in last 365 days
+    author_count: int = 0              # DEPRECATED: Use standalone GitRepoProfile. Unique contributors to this file
+    last_modified: str | None = None   # DEPRECATED: Use standalone GitRepoProfile. ISO date of most recent commit
+    # "method" = attributed to specific source file; "file" = all methods share same bundled file
+    git_scope: str | None = None       # DEPRECATED: Use standalone GitRepoProfile. "method" | "file" | None (no git data)
+
     class Config:
         use_enum_values = True
 
