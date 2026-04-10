@@ -1,5 +1,6 @@
 from ..models.method_node import MethodNode, ClassNode, ModuleNode
 from ..models.call_edge import CallEdge, CallType, ImportEdge
+from .external_classifier import classify_call
 
 
 class JSCallResolver:
@@ -7,12 +8,13 @@ class JSCallResolver:
     Resolves abstract call sites extracted by JSASTVisitor into fully 
     qualified global identifiers based on JS heuristics (e.g. `this.`, `super.`).
     """
-    def __init__(self, methods: list[MethodNode], classes: list[ClassNode], modules: list[ModuleNode], imports: list[ImportEdge], symbol_table: dict[str, dict[str, str]]):
+    def __init__(self, methods: list[MethodNode], classes: list[ClassNode], modules: list[ModuleNode], imports: list[ImportEdge], symbol_table: dict[str, dict[str, str]], project_dependencies: set[str] = None):
         # Build quick lookups against known IDs
         self.known_method_ids = {m.id for m in methods}
         self.classes_by_id = {c.id: c for c in classes}
         
         self.symbol_table = symbol_table
+        self.project_dependencies = project_dependencies or set()
         
         # Build a reverse lookup for "name matching"
         # name -> list of possible method ids
@@ -100,15 +102,22 @@ class JSCallResolver:
                         resolved.append(edge)
                         continue
                     else:
-                        # Multiple candidates. In JS, highly ambiguous. Unresolved.
-                        edge.call_type = CallType.UNRESOLVED
-                        edge.confidence = 0.0
-                        edge.target_id = f"external:ambiguous.{method_name}"
-                        resolved.append(edge)
-                        continue
+                        # Multiple candidates. Try locality heuristic: same file matches
+                        caller_module = edge.source_id.split(':')[0]
+                        file_candidates = [c for c in candidates if c.startswith(f"{caller_module}:")]
+                        if len(file_candidates) == 1:
+                            edge.target_id = file_candidates[0]
+                            edge.call_type = CallType.NAME_MATCH
+                            edge.confidence = 0.30
+                            resolved.append(edge)
+                            continue
                         
             # Unresolved
-            edge.call_type = CallType.UNRESOLVED
+            final_type = CallType.UNRESOLVED
+            if classify_call(call_text, "npm", self.project_dependencies) == "EXTERNAL":
+                final_type = CallType.EXTERNAL
+                
+            edge.call_type = final_type
             edge.confidence = 0.0
             edge.target_id = f"external:{call_text}"
             resolved.append(edge)

@@ -1,5 +1,6 @@
-from ..models.call_edge import CallEdge, CallType
+from ..models.call_edge import CallEdge, CallType, InheritanceEdge
 from ..models.method_node import MethodNode, ClassNode
+from .external_classifier import classify_call
 
 
 class CallResolver:
@@ -16,8 +17,10 @@ class CallResolver:
         all_methods: list[MethodNode],
         all_classes: list[ClassNode],
         import_map: dict[str, dict[str, str]],
-        # import_map[module_id][local_name] = resolved_qualified_name
+        all_inheritance: list[InheritanceEdge] = None,
+        project_dependencies: set[str] = None
     ):
+        self._project_dependencies = project_dependencies or set()
         # Build fast lookup indexes
         self._method_by_id: dict[str, MethodNode] = {m.id: m for m in all_methods}
         # Index methods by their short name for name-matching fallback
@@ -25,7 +28,15 @@ class CallResolver:
         for m in all_methods:
             self._methods_by_name.setdefault(m.name, []).append(m)
         self._class_by_id: dict[str, ClassNode] = {c.id: c for c in all_classes}
+        self._classes_by_name: dict[str, list[ClassNode]] = {}
+        for c in all_classes:
+            self._classes_by_name.setdefault(c.name, []).append(c)
         self._import_map = import_map
+        
+        self._inheritance_map: dict[str, list[str]] = {}
+        if all_inheritance:
+            for edge in all_inheritance:
+                self._inheritance_map.setdefault(edge.child_class_id, []).append(edge.parent_class_name)
 
     def resolve(self, raw_call: dict) -> CallEdge | None:
         """
@@ -89,6 +100,20 @@ class CallResolver:
                 is_conditional=is_conditional,
             )
 
+        # Step 2.5: Class Constructor Name Match
+        class_candidates = self._classes_by_name.get(name, [])
+        if class_candidates:
+            # We match to the first class found
+            class_id = class_candidates[0].id
+            init_id = f"{class_id}.__init__"
+            target_id = init_id if init_id in self._method_by_id else class_id
+            return CallEdge(
+                source_id=caller_id, target_id=target_id,
+                call_type=CallType.CONSTRUCTOR, line=line,
+                confidence=0.85, argument_count=arg_count,
+                is_conditional=is_conditional,
+            )
+
         # Step 3: Name-match across project
         candidates = self._methods_by_name.get(name, [])
         if len(candidates) == 1:
@@ -100,9 +125,13 @@ class CallResolver:
             )
 
         # Step 4: Unresolved
+        final_type = CallType.UNRESOLVED
+        if classify_call(name, "pypi", self._project_dependencies) == "EXTERNAL":
+            final_type = CallType.EXTERNAL
+            
         return CallEdge(
             source_id=caller_id, target_id=f"unresolved:{name}",
-            call_type=CallType.UNRESOLVED, line=line,
+            call_type=final_type, line=line,
             confidence=0.0, argument_count=arg_count,
         )
 
@@ -153,9 +182,20 @@ class CallResolver:
 
         # Step 2: super().method()
         if receiver == "super()" and caller_class:
-            # Find parent class and look up method there
-            # (full MRO resolution deferred to Phase 2)
-            pass
+            caller_class_id = f"{caller_module}:{caller_class}"
+            parent_names = self._inheritance_map.get(caller_class_id, [])
+            for parent_name in parent_names:
+                # check all project classes that match the parent name
+                parent_classes = self._classes_by_name.get(parent_name, [])
+                for pc in parent_classes:
+                    super_method_id = f"{pc.id}.{attr_name}"
+                    if super_method_id in self._method_by_id:
+                        return CallEdge(
+                            source_id=caller_id, target_id=super_method_id,
+                            call_type=CallType.SUPER_CALL, line=line,
+                            confidence=0.8, argument_count=arg_count,
+                            is_conditional=is_conditional,
+                        )
 
         # Step 3: ClassName() — constructor call
         # receiver is None for Name calls but attr_name may be "__init__"
@@ -195,11 +235,46 @@ class CallResolver:
                 confidence=0.4, argument_count=arg_count,
                 is_conditional=is_conditional,
             )
+        elif len(candidates) > 1:
+            if receiver == "self" and caller_class:
+                # Check parent classes
+                caller_class_id = f"{caller_module}:{caller_class}"
+                parent_names = self._inheritance_map.get(caller_class_id, [])
+                parent_candidates = []
+                for p_name in parent_names:
+                    p_classes = self._classes_by_name.get(p_name, [])
+                    for p_c in p_classes:
+                        p_meth = f"{p_c.id}.{attr_name}"
+                        if p_meth in self._method_by_id:
+                            parent_candidates.append(p_meth)
+                if len(parent_candidates) == 1:
+                    return CallEdge(
+                        source_id=caller_id, target_id=parent_candidates[0],
+                        call_type=CallType.SUPER_CALL, line=line,
+                        confidence=0.7, argument_count=arg_count,
+                        is_conditional=is_conditional,
+                    )
+            
+            # Locality heuristic: same module matches
+            caller_module = caller_id.split(':')[0]
+            file_candidates = [c for c in candidates if c.id.startswith(f"{caller_module}:")]
+            if len(file_candidates) == 1:
+                return CallEdge(
+                    source_id=caller_id, target_id=file_candidates[0].id,
+                    call_type=CallType.NAME_MATCH, line=line,
+                    confidence=0.3, argument_count=arg_count,
+                    is_conditional=is_conditional,
+                )
 
         # Step 6: Unresolved
+        target_name = f"{receiver}.{attr_name}" if receiver else attr_name
+        final_type = CallType.UNRESOLVED
+        if classify_call(target_name, "pypi", self._project_dependencies) == "EXTERNAL":
+            final_type = CallType.EXTERNAL
+            
         return CallEdge(
             source_id=caller_id,
-            target_id=f"unresolved:{receiver}.{attr_name}" if receiver else f"unresolved:{attr_name}",
-            call_type=CallType.UNRESOLVED, line=line,
+            target_id=f"unresolved:{target_name}",
+            call_type=final_type, line=line,
             confidence=0.0, argument_count=arg_count,
         )

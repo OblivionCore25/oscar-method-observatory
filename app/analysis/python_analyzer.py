@@ -27,7 +27,11 @@ class PythonAnalyzer(LanguageAnalyzer):
         oscar_version: str = "0.1.0"
     ) -> AnalysisResult:
         
-        root = project_path.resolve()
+        from pathlib import Path
+        from .dependency_extractor import extract_dependencies
+        root = Path(project_path).resolve()
+        
+        project_deps = extract_dependencies(root, "pypi")
 
         # ── 1. Scan ──────────────────────────────────────────────────
         config = ScanConfig(root_path=root, exclude_tests=exclude_tests, max_file_size_kb=max_file_size_kb)
@@ -47,6 +51,7 @@ class PythonAnalyzer(LanguageAnalyzer):
                 module_id=parsed.source_file.module_path,
                 file_path=parsed.source_file.relative_path,
                 relative_path=parsed.source_file.relative_path,
+                project_dependencies=project_deps
             )
             result = visitor.extract(parsed.ast_tree)
 
@@ -71,6 +76,8 @@ class PythonAnalyzer(LanguageAnalyzer):
             all_methods=all_methods,
             all_classes=all_classes,
             import_map=global_symbol_table,
+            all_inheritance=all_inheritance,
+            project_dependencies=project_deps,
         )
         resolved_calls = [resolver.resolve(rc) for rc in all_raw_calls]
         resolved_calls = [c for c in resolved_calls if c is not None]
@@ -92,9 +99,11 @@ class PythonAnalyzer(LanguageAnalyzer):
 
         # ── 7. Compute analysis metadata ─────────────────────────────
         unresolved_count = sum(1 for c in resolved_calls if c.call_type == "unresolved")
+        external_count = sum(1 for c in resolved_calls if c.call_type == "external")
         total_calls = len(resolved_calls)
+        internal_calls_denominator = total_calls - external_count
         resolution_rate = (
-            (total_calls - unresolved_count) / total_calls if total_calls > 0 else 1.0
+            (internal_calls_denominator - unresolved_count) / internal_calls_denominator if internal_calls_denominator > 0 else 1.0
         )
         total_loc = sum(f.size_bytes for f in source_files) // 50  # rough estimate
 
@@ -108,7 +117,7 @@ class PythonAnalyzer(LanguageAnalyzer):
             method_count=len(all_methods),
             class_count=len(all_classes),
             module_count=len(all_modules),
-            edge_count=sum(1 for c in resolved_calls if not c.target_id.startswith("unresolved:")),
+            edge_count=sum(1 for c in resolved_calls if c.call_type not in ("unresolved", "external")),
             unresolved_call_count=unresolved_count,
             resolution_rate=round(resolution_rate, 4),
         )

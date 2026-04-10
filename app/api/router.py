@@ -124,7 +124,11 @@ async def auto_ingest_package(
             exclude_tests=True
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        import traceback
+        tb = traceback.format_exc()
+        # Print to our terminal for debugging
+        print(tb)
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}\n{tb}")
     finally:
         # Cleanup source code as requested
         target_dir = source_root

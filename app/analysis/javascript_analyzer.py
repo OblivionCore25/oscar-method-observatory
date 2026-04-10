@@ -14,6 +14,8 @@ from ..metrics.graph_metrics import compute_graph_metrics
 
 class JavaScriptAnalyzer(LanguageAnalyzer):
     def analyze(self, project_path: Path, project_slug: str, exclude_tests: bool = False, max_file_size_kb: int = 500, oscar_version: str = "0.1.0") -> AnalysisResult:
+        from .dependency_extractor import extract_dependencies
+        project_deps = extract_dependencies(project_path, "npm")
         
         # 1. Scan for files
         from app.ingestion.project_scanner import DEFAULT_EXCLUDE_DIRS, ScanConfig
@@ -54,12 +56,15 @@ class JavaScriptAnalyzer(LanguageAnalyzer):
         sym_table = sym_table_builder.build(modules, imports, methods, classes)
         
         # 4. Resolve Calls
-        resolver = JSCallResolver(methods, classes, modules, imports, sym_table)
+        resolver = JSCallResolver(methods, classes, modules, imports, sym_table, project_deps)
         resolved_calls = resolver.resolve(call_edges)
         
-        resolved_count = sum(1 for c in resolved_calls if c.call_type != "unresolved")
+        resolved_count = sum(1 for c in resolved_calls if c.call_type not in ("unresolved", "external"))
+        unresolved_count = sum(1 for c in resolved_calls if c.call_type == "unresolved")
+        external_count = sum(1 for c in resolved_calls if c.call_type == "external")
         total_calls = len(resolved_calls)
-        resolution_rate = resolved_count / total_calls if total_calls > 0 else 1.0
+        internal_calls_denominator = total_calls - external_count
+        resolution_rate = (internal_calls_denominator - unresolved_count) / internal_calls_denominator if internal_calls_denominator > 0 else 1.0
         
         # 5. Build Graph and calculate metrics
         gb = GraphBuilder()
@@ -85,8 +90,8 @@ class JavaScriptAnalyzer(LanguageAnalyzer):
             method_count=len(methods),
             class_count=len(classes),
             module_count=len(modules),
-            edge_count=len(resolved_calls),
-            unresolved_call_count=total_calls - resolved_count,
+            edge_count=resolved_count,
+            unresolved_call_count=unresolved_count,
             analysis_approach="tree_sitter_static",
             resolution_rate=round(resolution_rate, 3)
         )

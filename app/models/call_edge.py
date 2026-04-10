@@ -9,6 +9,7 @@ class CallType(str, Enum):
     CONSTRUCTOR = "constructor"    # ClassName() — resolved to __init__
     MODULE_CALL = "module_call"    # module.func() — resolved via import
     NAME_MATCH = "name_match"      # obj.method() — target matched by name only, type unknown
+    EXTERNAL = "external"          # standard library, built-ins, or external 3p packages
     UNRESOLVED = "unresolved"      # call target could not be determined at all
 
 
