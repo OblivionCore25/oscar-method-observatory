@@ -11,15 +11,28 @@ def _normalise_git_url(url: str) -> str | None:
     """Convert various git URL formats to a plain HTTPS clone URL."""
     if not url:
         return None
+        
     url = url.strip().rstrip("/")
-    if url.startswith("git@"):
-        url = url.replace(":", "/", 1).replace("git@", "https://", 1)
+    
+    # Strip any commit hash fragments (#...)
+    import re
+    url = re.sub(r'#.*$', '', url)
+    
+    # Handle git+ prefixes
     if url.startswith("git+"):
         url = url[4:]
+        
+    # Handle various protocol transformations to pure HTTPS
+    if url.startswith("git://"):
+        url = url.replace("git://", "https://", 1)
+    elif url.startswith("git@"):
+        url = url.replace(":", "/", 1).replace("git@", "https://", 1)
+    elif url.startswith("ssh://git@"):
+        url = url.replace("ssh://git@", "https://", 1)
+
     if not any(host in url for host in _GIT_HOSTS):
         return None
         
-    import re
     # Strip monorepo subdirectory paths like /tree/master/packages/foo
     if "github.com" in url or "gitlab.com" in url:
         url = re.sub(r'/(tree|blob)/.*$', '', url)
