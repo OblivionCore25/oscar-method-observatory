@@ -7,6 +7,9 @@ DEFAULT_EXCLUDE_DIRS = {
     "__pycache__", ".venv", "venv", "env", ".env",
     "node_modules", ".git", ".tox", "dist", "build", ".next", "coverage",
     "*.egg-info", ".mypy_cache", ".pytest_cache",
+    # Non-production code: consumer-side examples, docs, benchmarks, tests
+    "examples", "example", "docs", "doc", "benchmarks", "benchmark", "bench",
+    "test", "tests", "__tests__", "fixtures", "spec",
 }
 
 @dataclass

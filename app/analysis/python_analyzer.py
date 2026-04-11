@@ -100,8 +100,10 @@ class PythonAnalyzer(LanguageAnalyzer):
         # ── 7. Compute analysis metadata ─────────────────────────────
         unresolved_count = sum(1 for c in resolved_calls if c.call_type == "unresolved")
         external_count = sum(1 for c in resolved_calls if c.call_type == "external")
+        dynamic_count = sum(1 for c in resolved_calls if c.call_type == "dynamic")
         total_calls = len(resolved_calls)
-        internal_calls_denominator = total_calls - external_count
+        # Denominator: exclude both external (out-of-project) and dynamic (runtime-dispatched)
+        internal_calls_denominator = total_calls - external_count - dynamic_count
         resolution_rate = (
             (internal_calls_denominator - unresolved_count) / internal_calls_denominator if internal_calls_denominator > 0 else 1.0
         )
@@ -117,7 +119,7 @@ class PythonAnalyzer(LanguageAnalyzer):
             method_count=len(all_methods),
             class_count=len(all_classes),
             module_count=len(all_modules),
-            edge_count=sum(1 for c in resolved_calls if c.call_type not in ("unresolved", "external")),
+            edge_count=sum(1 for c in resolved_calls if c.call_type not in ("unresolved", "external", "dynamic")),
             unresolved_call_count=unresolved_count,
             resolution_rate=round(resolution_rate, 4),
         )

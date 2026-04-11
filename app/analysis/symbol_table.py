@@ -21,7 +21,20 @@ class ProjectSymbolTable:
         for m in modules:
             self._table[m.id] = {}
 
-        # 2. Register native declarations (classes and top-level functions)
+        # 2. Build a module alias map for resolving short names → full IDs
+        # E.g., "flask" → "src.flask", "helpers" → "src.flask.helpers"
+        module_ids = set(self._table.keys())
+        self._module_alias_map: dict[str, str] = {}
+        for mid in module_ids:
+            # Map the last component: "src.flask.helpers" → "helpers"
+            parts = mid.split(".")
+            for i in range(len(parts)):
+                suffix = ".".join(parts[i:])
+                # Only map if unambiguous (or prefer longer match)
+                if suffix not in self._module_alias_map:
+                    self._module_alias_map[suffix] = mid
+
+        # 3. Register native declarations (classes and top-level functions)
         for cls in classes:
             if cls.module in self._table:
                 self._table[cls.module][cls.name] = cls.id
@@ -30,10 +43,10 @@ class ProjectSymbolTable:
             if not m.class_name and m.module in self._table:
                 self._table[m.module][m.name] = m.id
 
-        # 3. Iteratively resolve imports (transitive closure)
+        # 4. Iteratively resolve imports (transitive closure)
         changed = True
         passes = 0
-        while changed and passes < 5:
+        while changed and passes < 10:
             changed = False
             passes += 1
             
@@ -43,6 +56,12 @@ class ProjectSymbolTable:
                 
                 src = imp.source_module
                 tgt = imp.target_module
+                
+                # Normalize target module using alias map if not found directly
+                if tgt not in self._table:
+                    resolved_tgt = self._resolve_module_alias(tgt)
+                    if resolved_tgt:
+                        tgt = resolved_tgt
                 
                 if src not in self._table or tgt not in self._table:
                     continue
@@ -64,3 +83,23 @@ class ProjectSymbolTable:
                                 changed = True
 
         return self._table
+
+    def _resolve_module_alias(self, target: str) -> str | None:
+        """
+        Attempt to resolve a module name that doesn't match any known module ID.
+        
+        Examples:
+            "flask"      → "src.flask"       (prefix missing)
+            "src.helpers" → "src.flask.helpers" (intermediate package missing)
+            "helpers"    → "src.flask.helpers" (short name)
+        """
+        # Direct alias lookup
+        if target in self._module_alias_map:
+            return self._module_alias_map[target]
+        
+        # Try suffix matching: "flask" could match "src.flask"
+        for mid in self._table:
+            if mid.endswith(f".{target}") or mid.endswith(f".{target.replace('.', '.')}"):
+                return mid
+        
+        return None

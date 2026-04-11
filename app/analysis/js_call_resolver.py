@@ -112,10 +112,25 @@ class JSCallResolver:
                             resolved.append(edge)
                             continue
                         
+            # Check for dynamic dispatch pattern first
+            from .external_classifier import is_dynamic_call
+            if is_dynamic_call(call_text, "attribute"):
+                edge.call_type = CallType.DYNAMIC
+                edge.confidence = 0.0
+                edge.target_id = f"dynamic:{call_text}"
+                resolved.append(edge)
+                continue
+            
             # Unresolved
             final_type = CallType.UNRESOLVED
             if classify_call(call_text, "npm", self.project_dependencies) == "EXTERNAL":
                 final_type = CallType.EXTERNAL
+            else:
+                # Definition-existence criterion (§2.4): if zero definitions match
+                # this name anywhere in the project, the target is necessarily external.
+                method_name = call_text.split('.')[-1] if '.' in call_text else call_text
+                if len(self.name_registry.get(method_name, [])) == 0:
+                    final_type = CallType.EXTERNAL
                 
             edge.call_type = final_type
             edge.confidence = 0.0

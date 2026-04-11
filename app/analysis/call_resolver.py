@@ -1,6 +1,6 @@
 from ..models.call_edge import CallEdge, CallType, InheritanceEdge
 from ..models.method_node import MethodNode, ClassNode
-from .external_classifier import classify_call
+from .external_classifier import classify_call, is_dynamic_call
 
 
 class CallResolver:
@@ -55,11 +55,11 @@ class CallResolver:
         elif expr_type == "attribute":
             return self._resolve_attribute_call(raw_call, caller_id, line, arg_count, is_conditional)
         else:
-            # "other" — indirect call, cannot resolve
+            # "other" — indirect call (subscript, starred, etc.), classify as DYNAMIC
             return CallEdge(
                 source_id=caller_id,
-                target_id="unresolved:indirect",
-                call_type=CallType.UNRESOLVED,
+                target_id="dynamic:indirect",
+                call_type=CallType.DYNAMIC,
                 line=line,
                 confidence=0.0,
                 argument_count=arg_count,
@@ -72,8 +72,9 @@ class CallResolver:
         Resolution order:
         1. Look up name in import_map for caller's module → may resolve to a project function
         2. Look up name directly as a method in the same module
+        2.5. Class Constructor Name Match
         3. Name-match fallback: if unique match, use it with medium confidence
-        4. Unresolved
+        4. Dynamic / External / Unresolved
         """
         name: str = raw_call["call_name"]
         caller_module = caller_id.rsplit(":", 1)[0] if ":" in caller_id else caller_id
@@ -124,9 +125,20 @@ class CallResolver:
                 is_conditional=is_conditional,
             )
 
-        # Step 4: Unresolved
+        # Step 4: Dynamic / External / Unresolved
+        if is_dynamic_call(name, "name"):
+            return CallEdge(
+                source_id=caller_id, target_id=f"dynamic:{name}",
+                call_type=CallType.DYNAMIC, line=line,
+                confidence=0.0, argument_count=arg_count,
+            )
+        
         final_type = CallType.UNRESOLVED
         if classify_call(name, "pypi", self._project_dependencies) == "EXTERNAL":
+            final_type = CallType.EXTERNAL
+        # Definition-existence criterion (§2.4): if zero definitions match this
+        # name anywhere in the project, the target is necessarily external.
+        elif len(candidates) == 0 and name not in self._classes_by_name:
             final_type = CallType.EXTERNAL
             
         return CallEdge(
@@ -140,12 +152,14 @@ class CallResolver:
         Resolve: obj.method() or self.method() or module.func()
 
         Resolution order:
+        0. Type-annotation resolution (receiver has a type hint)
         1. self.method() → look up in the caller's own class
+        1.5. self.method() MRO — traverse inheritance chain
         2. super().method() → look up in parent class
         3. ClassName.method() — receiver is a known class name → constructor or classmethod
         4. module.func() — receiver matches an import alias → look up in that module
         5. Name-match fallback on method name alone
-        6. Unresolved
+        6. Dynamic / External / Unresolved
         """
         attr_name: str = raw_call["attr_name"]
         receiver: str | None = raw_call["receiver_name"]
@@ -179,6 +193,12 @@ class CallResolver:
                     confidence=0.95, argument_count=arg_count,
                     is_conditional=is_conditional,
                 )
+            
+            # Step 1.5: MRO traversal — method is inherited from parent
+            caller_class_id = f"{caller_module}:{caller_class}"
+            mro_result = self._resolve_via_mro(caller_class_id, attr_name, caller_id, line, arg_count, is_conditional)
+            if mro_result:
+                return mro_result
 
         # Step 2: super().method()
         if receiver == "super()" and caller_class:
@@ -266,11 +286,29 @@ class CallResolver:
                     is_conditional=is_conditional,
                 )
 
-        # Step 6: Unresolved
+        # Step 6: Dynamic / External / Unresolved
         target_name = f"{receiver}.{attr_name}" if receiver else attr_name
+        
+        # Check if this is a dynamic dispatch pattern
+        if is_dynamic_call(target_name, "attribute"):
+            return CallEdge(
+                source_id=caller_id,
+                target_id=f"dynamic:{target_name}",
+                call_type=CallType.DYNAMIC, line=line,
+                confidence=0.0, argument_count=arg_count,
+            )
+        
         final_type = CallType.UNRESOLVED
         if classify_call(target_name, "pypi", self._project_dependencies) == "EXTERNAL":
             final_type = CallType.EXTERNAL
+        else:
+            # Definition-existence criterion (§2.4): if zero definitions match
+            # this method name anywhere in the project, the target is necessarily external.
+            method_name = attr_name
+            method_candidates = self._methods_by_name.get(method_name, [])
+            class_candidates = self._classes_by_name.get(method_name, [])
+            if len(method_candidates) == 0 and len(class_candidates) == 0:
+                final_type = CallType.EXTERNAL
             
         return CallEdge(
             source_id=caller_id,
@@ -278,3 +316,36 @@ class CallResolver:
             call_type=final_type, line=line,
             confidence=0.0, argument_count=arg_count,
         )
+
+    def _resolve_via_mro(self, class_id: str, method_name: str, 
+                          caller_id: str, line: int, arg_count: int,
+                          is_conditional: bool) -> CallEdge | None:
+        """
+        Traverse the Method Resolution Order (MRO) to find an inherited method.
+        Uses BFS over the inheritance chain.
+        """
+        visited = set()
+        queue = [class_id]
+        
+        while queue:
+            current_class_id = queue.pop(0)
+            if current_class_id in visited:
+                continue
+            visited.add(current_class_id)
+            
+            parent_names = self._inheritance_map.get(current_class_id, [])
+            for parent_name in parent_names:
+                parent_classes = self._classes_by_name.get(parent_name, [])
+                for pc in parent_classes:
+                    target_id = f"{pc.id}.{method_name}"
+                    if target_id in self._method_by_id:
+                        return CallEdge(
+                            source_id=caller_id, target_id=target_id,
+                            call_type=CallType.SELF_CALL, line=line,
+                            confidence=0.75, argument_count=arg_count,
+                            is_conditional=is_conditional,
+                        )
+                    # Continue traversing up the hierarchy
+                    queue.append(pc.id)
+        
+        return None
