@@ -34,7 +34,13 @@ def get_reachability(
         
     analyzer = ReachabilityAnalyzer()
     rs = analyzer.check_reachability(target_functions, result)
-    entry_points = analyzer.find_entry_points(result.methods, result.calls)
+    entry_points = analyzer.find_entry_points(
+        result.methods,
+        result.calls,
+        modules=result.modules,
+        imports=result.imports,
+        classes=result.classes,
+    )
     
     return ReachabilityResponse(
         results=rs,
