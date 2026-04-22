@@ -1,3 +1,4 @@
+from __future__ import annotations
 from ..models.call_edge import CallEdge, CallType, InheritanceEdge
 from ..models.method_node import MethodNode, ClassNode
 from .external_classifier import classify_call, is_dynamic_call

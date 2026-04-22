@@ -1,3 +1,4 @@
+from __future__ import annotations
 from ..models.method_node import MethodNode, ModuleNode, ClassNode
 from ..models.call_edge import ImportEdge
 

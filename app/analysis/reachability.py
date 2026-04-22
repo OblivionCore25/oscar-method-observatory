@@ -1,3 +1,4 @@
+from __future__ import annotations
 import collections
 from typing import Set, List
 from pydantic import BaseModel

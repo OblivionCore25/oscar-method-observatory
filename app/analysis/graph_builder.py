@@ -1,3 +1,4 @@
+from __future__ import annotations
 import networkx as nx
 from ..models.method_node import MethodNode
 from ..models.call_edge import CallEdge, CallType

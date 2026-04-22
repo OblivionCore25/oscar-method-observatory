@@ -1,3 +1,4 @@
+from __future__ import annotations
 PYTHON_BUILTINS = {
     'print', 'len', 'range', 'enumerate', 'zip', 'map', 'filter', 'sorted', 'reversed',
     'list', 'dict', 'set', 'tuple', 'str', 'int', 'float', 'bool', 'type', 'super', 

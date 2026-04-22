@@ -1,3 +1,4 @@
+from __future__ import annotations
 import networkx as nx
 
 def compute_graph_metrics(graph: nx.DiGraph) -> dict[str, dict]:

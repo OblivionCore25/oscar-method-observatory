@@ -1,6 +1,7 @@
+from __future__ import annotations
 import logging
 import urllib.parse
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..models.git_profile import GitRepoHealth, GitFileChurn, GitAnalysisResult
@@ -50,7 +51,7 @@ class GitService:
         health = GitRepoHealth(
             project_slug=project_slug,
             repo_url=repo_url,
-            analyzed_at=datetime.now(UTC),
+            analyzed_at=datetime.now(timezone.utc),
             **health_dict
         )
         

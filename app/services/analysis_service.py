@@ -1,3 +1,4 @@
+from __future__ import annotations
 from pathlib import Path
 from ..models.analysis_result import AnalysisResult
 from ..storage.factory import get_storage

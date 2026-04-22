@@ -1,3 +1,4 @@
+from __future__ import annotations
 from ..models.method_node import MethodNode, ClassNode, ModuleNode
 from ..models.call_edge import CallEdge, CallType, ImportEdge
 from .external_classifier import classify_call

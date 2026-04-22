@@ -1,3 +1,4 @@
+from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 from ..models.method_node import MethodNode, ClassNode, ModuleNode, MethodKind

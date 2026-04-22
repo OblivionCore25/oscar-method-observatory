@@ -1,3 +1,4 @@
+from __future__ import annotations
 from pathlib import Path
 from app.config import settings
 from app.storage.sqlite_storage import SqliteStorage

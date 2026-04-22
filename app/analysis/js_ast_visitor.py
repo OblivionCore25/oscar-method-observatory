@@ -1,3 +1,4 @@
+from __future__ import annotations
 import tree_sitter_javascript as tsjavascript
 from tree_sitter import Language, Parser, Node
 import uuid
