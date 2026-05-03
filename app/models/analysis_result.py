@@ -1,3 +1,4 @@
+from __future__ import annotations
 from datetime import datetime
 from pydantic import BaseModel
 from .method_node import MethodNode, ClassNode, ModuleNode
@@ -17,6 +18,7 @@ class MethodMetrics(BaseModel):
     # Phase 2+ fields (None until computed)
     betweenness_centrality: float | None = None
     pagerank: float | None = None
+    eigenvector_centrality: float | None = None
     community_id: int | None = None
     blast_radius: int | None = None
 
@@ -36,6 +38,9 @@ class AnalysisMeta(BaseModel):
     analysis_approach: str = "ast_static"
     # Completeness estimate: resolved_calls / total_calls
     resolution_rate: float = 0.0
+    # True when the package is pre-bundled into a single file (e.g. dist/index.js),
+    # meaning git churn metrics are file-level, not method-level.
+    is_bundled: bool = False
 
 
 class AnalysisResult(BaseModel):

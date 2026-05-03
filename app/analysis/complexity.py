@@ -1,3 +1,4 @@
+from __future__ import annotations
 import ast
 
 # AST node types that each add 1 to cyclomatic complexity

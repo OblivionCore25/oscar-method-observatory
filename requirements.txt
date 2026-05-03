@@ -2,7 +2,7 @@ fastapi==0.115.11
 uvicorn==0.34.0
 pydantic==2.10.6
 pydantic-settings==2.8.1
-networkx==3.4.2
+networkx
 httpx==0.28.1
 libcst==1.6.0
 chardet==5.2.0
@@ -10,3 +10,7 @@ cdlib==0.3.0
 python-louvain==0.16
 sqlalchemy==2.0.38
 alembic==1.14.1
+psycopg2-binary>=2.9.9
+tree-sitter>=0.23.0
+tree-sitter-javascript>=0.23.0
+tree-sitter-typescript>=0.23.0

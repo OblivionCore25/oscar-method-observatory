@@ -1,3 +1,4 @@
+from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 from pathlib import Path
@@ -20,6 +21,13 @@ class AnalyzeSummaryResponse(BaseModel):
     meta: AnalysisMeta
     top_risk: list[MethodMetrics]  # Top 10 by bottleneck score
 
+class IngestResponse(BaseModel):
+    project_slug: str
+    message: str
+    is_meta_package: bool = False
+    resolved_core_slug: str | None = None
+    meta_dependencies: list[str] = []
+
 
 class MethodDetailResponse(BaseModel):
     method: dict                   # Full MethodNode serialized
@@ -38,11 +46,16 @@ def get_service() -> AnalysisService:
         max_file_size_kb=settings.method_max_file_size_kb
     )
 
+def get_git_service():
+    from app.config import settings
+    from app.services.git_service import GitService
+    return GitService(data_directory=Path(settings.data_directory))
+
 
 # ── Endpoints ─────────────────────────────────────────────────────────────── #
 
 @router.post("/analyze", response_model=AnalyzeSummaryResponse)
-async def analyze_project(request: AnalyzeRequest, service: AnalysisService = Depends(get_service)):
+def analyze_project(request: AnalyzeRequest, service: AnalysisService = Depends(get_service)):
     """
     Trigger analysis of a Python project directory.
     Runs the full ingestion → AST parsing → call resolution → metrics pipeline.
@@ -58,21 +71,189 @@ async def analyze_project(request: AnalyzeRequest, service: AnalysisService = De
         raise HTTPException(status_code=500, detail=str(e))
 
     top_risk = sorted(result.metrics, key=lambda m: m.bottleneck_score, reverse=True)[:10]
-    return AnalyzeSummaryResponse(
-        project_slug=request.project_slug,
-        meta=result.meta,
-        top_risk=top_risk,
+    return AnalyzeSummaryResponse(project_slug=result.meta.project_slug, meta=result.meta, top_risk=top_risk)
+
+
+
+@router.post("/ingest/{ecosystem}/{package_name:path}", response_model=IngestResponse)
+async def auto_ingest_package(
+    ecosystem: str,
+    package_name: str,
+    version: str | None = Query(default=None, description="Specific version to analyze. Defaults to the latest if not provided."),
+    service: AnalysisService = Depends(get_service)
+):
+    """
+    Downloads package source code (if PyPI) and executes AST analysis, 
+    deleting the source files immediately after success.
+    """
+    if ecosystem.lower() not in ("pypi", "npm"):
+        raise HTTPException(status_code=400, detail="Only PyPI and NPM ecosystems are currently supported for auto-ingestion.")
+        
+    import shutil
+    import urllib.parse
+    from app.config import settings
+    from app.ingestion.pypi_downloader import download_and_extract_pypi
+    from app.ingestion.npm_downloader import download_and_extract_npm
+    
+    download_base_dir = Path(settings.data_directory) / "downloads"
+    
+    # Check if package name is URL encoded (for scoped npm packages like %40babel%2Fcore)
+    # The API might receive it encoded or decoded depending on the caller.
+    # Safe to unquote it to get the real name e.g. @babel/core
+    decoded_package_name = urllib.parse.unquote(package_name)
+    
+    try:
+        if ecosystem.lower() == "npm":
+            source_root = download_and_extract_npm(decoded_package_name, download_base_dir)
+        else:
+            source_root = download_and_extract_pypi(decoded_package_name, download_base_dir, version=version)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch {ecosystem} package: {str(e)}")
+
+    try:
+        # We pass the extracted dir to the service
+        # The service will overwrite any existing run in postgres automatically
+        # For scoped packages, we normalize the slug because it's used in URLs and DB keys
+        normalized_slug = decoded_package_name.replace("@", "").replace("/", "__")
+        if ecosystem.lower() == "pypi":
+            normalized_slug = normalized_slug.lower()
+        
+        result = service.analyze(
+            project_path=str(source_root),
+            project_slug=normalized_slug,
+            ecosystem=ecosystem.lower(),
+            exclude_tests=True
+        )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        # Print to our terminal for debugging
+        print(tb)
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}\n{tb}")
+    finally:
+        # Cleanup source code as requested
+        target_dir = source_root
+        # Handle the case where source_root was inside a parent extraction dir 
+        # (e.g. downloads/flask_3.0.0/flask-3.0.0/). We want to clean the parent.
+        if target_dir.parent == download_base_dir:
+            shutil.rmtree(target_dir, ignore_errors=True)
+        else:
+            shutil.rmtree(target_dir.parent, ignore_errors=True)
+
+    is_meta_package = False
+    resolved_core_slug = None
+    meta_dependencies = []
+
+    # Meta-Package Ast Redirection Fallback
+    if result.meta.method_count == 0:
+        import httpx
+        import re
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                r = client.get(f"https://pypi.org/pypi/{package_name}/json")
+                if r.status_code == 200:
+                    data = r.json()
+                    reqs = data.get("info", {}).get("requires_dist") or []
+                    
+                    parsed_reqs = []
+                    for req in reqs:
+                        match = re.search(r'^([a-zA-Z0-9_\-]+)', req)
+                        if match:
+                            parsed_reqs.append(match.group(1).lower())
+                            
+                    if parsed_reqs:
+                        is_meta_package = True
+                        # Uniquify maintaining order
+                        meta_dependencies = list(dict.fromkeys(parsed_reqs))
+                        
+                        # Heuristic Core Matching
+                        candidates = [dep for dep in meta_dependencies if dep.startswith(package_name.lower()) and len(dep) > len(package_name)]
+                        if candidates:
+                            resolved_core_slug = sorted(candidates, key=len)[0]
+                            
+                            # Transitive Deep Ingest
+                            source_root_core = download_and_extract_pypi(resolved_core_slug, download_base_dir)
+                            try:
+                                service.analyze(
+                                    project_path=str(source_root_core),
+                                    project_slug=resolved_core_slug,
+                                    exclude_tests=True
+                                )
+                            except Exception:
+                                pass # Provide partial degraded if transit fails
+                            finally:
+                                if source_root_core.parent == download_base_dir:
+                                    shutil.rmtree(source_root_core, ignore_errors=True)
+                                else:
+                                    shutil.rmtree(source_root_core.parent, ignore_errors=True)
+                                    
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Meta-Package check failed: {e}")
+
+    return IngestResponse(
+        project_slug=normalized_slug,
+        message=f"Successfully analyzed {ecosystem} package '{package_name}'.",
+        is_meta_package=is_meta_package,
+        resolved_core_slug=resolved_core_slug,
+        meta_dependencies=meta_dependencies
     )
 
 
-@router.get("/projects", response_model=list[str])
-async def list_projects(service: AnalysisService = Depends(get_service)):
+
+@router.get("/projects", response_model=list[dict])
+def list_projects(service: AnalysisService = Depends(get_service)):
     """List all previously analyzed projects."""
     return service.list_projects()
 
+@router.post("/git-profile/{ecosystem}/{package_name:path}")
+def analyze_git_profile(
+    ecosystem: str,
+    package_name: str,
+    version: str | None = Query(default=None),
+    git_service = Depends(get_git_service)
+):
+    try:
+        import urllib.parse
+        slug = urllib.parse.unquote(package_name).replace("@", "").replace("/", "__")
+        if ecosystem.lower() == "pypi":
+            slug = slug.lower()
+        result = git_service.analyze(project_slug=slug, ecosystem=ecosystem, package_name=package_name, version=version)
+        return result.health
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{project_slug}/git-profile")
+def get_git_profile(project_slug: str, git_service = Depends(get_git_service)):
+    profile = git_service.load_profile(project_slug)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Git profile not found")
+    return profile
+
+@router.get("/{project_slug}/git-files")
+def get_git_files(
+    project_slug: str,
+    sort: str = Query(default="commits"),
+    limit: int = Query(default=200),
+    git_service = Depends(get_git_service)
+):
+    files = git_service.load_file_churn(project_slug)
+    if sort == "commits":
+        files.sort(key=lambda x: x.commits, reverse=True)
+    elif sort == "authors":
+        files.sort(key=lambda x: x.author_count, reverse=True)
+    return files[:limit]
+
+@router.get("/{project_slug}/git-contributors")
+def get_git_contributors(project_slug: str, git_service = Depends(get_git_service)):
+    profile = git_service.load_profile(project_slug)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Git profile not found")
+    return profile.top_contributors
+
 
 @router.get("/{project_slug}", response_model=AnalysisMeta)
-async def get_project_meta(project_slug: str, service: AnalysisService = Depends(get_service)):
+def get_project_meta(project_slug: str, service: AnalysisService = Depends(get_service)):
     """Return analysis metadata for a project (summary statistics)."""
     result = service.load(project_slug)
     if not result:
@@ -81,7 +262,7 @@ async def get_project_meta(project_slug: str, service: AnalysisService = Depends
 
 
 @router.get("/{project_slug}/top-risk", response_model=list[MethodMetrics])
-async def get_top_risk(
+def get_top_risk(
     project_slug: str,
     limit: int = Query(default=10, ge=1, le=100),
     service: AnalysisService = Depends(get_service),
@@ -98,7 +279,7 @@ async def get_top_risk(
 
 
 @router.get("/{project_slug}/orphans", response_model=list[dict])
-async def get_orphans(
+def get_orphans(
     project_slug: str,
     service: AnalysisService = Depends(get_service),
 ):
@@ -117,7 +298,7 @@ async def get_orphans(
 
 
 @router.get("/{project_slug}/hotspots", response_model=list[dict])
-async def get_hotspots(
+def get_hotspots(
     project_slug: str,
     limit: int = Query(default=20, ge=1, le=100),
     service: AnalysisService = Depends(get_service),
@@ -129,26 +310,58 @@ async def get_hotspots(
     if not result:
         raise HTTPException(status_code=404, detail=f"Project '{project_slug}' not found")
 
+    import math
+    from fastapi import Depends
+    
+    # We resolve git service directly to load the map
+    from app.config import settings
+    from app.services.git_service import GitService
+    git_service = GitService(data_directory=Path(settings.data_directory))
+    git_churn_map = git_service.load_file_churn_map(project_slug)
+
     method_map = {m.id: m for m in result.methods}
     hotspots = []
     for m in result.metrics:
+        method_node = method_map.get(m.method_id)
+        if not method_node:
+            continue
+            
         comp = m.complexity or 1
         cent = m.betweenness_centrality or 0.0
         blast = m.blast_radius or 0
-        score = comp * cent * blast
+        
+        structural_risk = comp * cent * blast
+
+        # Heuristic path match query-time JOIN (Suffix matching for Monorepos)
+        file_churn = git_churn_map.get(method_node.file_path)
+        if not file_churn:
+            for git_path, churn_obj in git_churn_map.items():
+                if git_path.endswith(method_node.file_path):
+                    file_churn = churn_obj
+                    break
+
+        if file_churn:
+            temporal_factor = max(math.log2(1 + file_churn.commits), 1.0)
+            composite_risk = structural_risk * temporal_factor
+        else:
+            temporal_factor = 1.0
+            composite_risk = structural_risk
+            
         hotspots.append({
-            "method": method_map[m.method_id].model_dump() if m.method_id in method_map else None,
+            "method": method_node.model_dump(),
             "metrics": m.model_dump(),
-            "composite_risk": score
+            "structural_risk": structural_risk,
+            "composite_risk": composite_risk,
+            "temporal_factor": temporal_factor,
+            "git_data_available": file_churn is not None
         })
     
-    hotspots = [h for h in hotspots if h["method"]]
     ranked = sorted(hotspots, key=lambda x: x["composite_risk"], reverse=True)
     return ranked[:limit]
 
 
 @router.get("/{project_slug}/communities", response_model=dict[str, list[dict]])
-async def get_communities(
+def get_communities(
     project_slug: str,
     service: AnalysisService = Depends(get_service),
 ):
@@ -177,7 +390,7 @@ async def get_communities(
 
 
 @router.get("/{project_slug}/method/{method_id:path}/blast-radius", response_model=dict)
-async def get_blast_radius(
+def get_blast_radius(
     project_slug: str,
     method_id: str,
     service: AnalysisService = Depends(get_service),
@@ -222,8 +435,78 @@ async def get_blast_radius(
     }
 
 
+@router.get("/{project_slug}/method/{method_id:path}/neighborhood", response_model=dict)
+def get_neighborhood(
+    project_slug: str,
+    method_id: str,
+    degrees: int = 2,
+    service: AnalysisService = Depends(get_service),
+):
+    """
+    Return the local N-degree neighborhood of a method (both callers and callees).
+    """
+    result = service.load(project_slug)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Project '{project_slug}' not found")
+
+    import networkx as nx
+    G = nx.DiGraph()
+    for c in result.calls:
+        if c.confidence > 0:
+            G.add_edge(c.source_id, c.target_id, **c.model_dump())
+
+    if method_id not in G:
+        G.add_node(method_id)
+
+    downstream = set([method_id])
+    if method_id in G:
+        down_queue = [(method_id, 0)]
+        while down_queue:
+            node, depth = down_queue.pop(0)
+            if depth < degrees:
+                for target in G.successors(node):
+                    if target not in downstream:
+                        downstream.add(target)
+                        down_queue.append((target, depth + 1))
+                        
+    upstream = set([method_id])
+    if method_id in G:
+        up_queue = [(method_id, 0)]
+        while up_queue:
+            node, depth = up_queue.pop(0)
+            if depth < degrees:
+                for source in G.predecessors(node):
+                    if source not in upstream:
+                        upstream.add(source)
+                        up_queue.append((source, depth + 1))
+                        
+    neighborhood = downstream.union(upstream)
+    
+    method_map = {m.id: m.model_dump() for m in result.methods}
+    metrics_map = {m.method_id: m.model_dump() for m in result.metrics}
+
+    nodes = []
+    edges = []
+    
+    for n in neighborhood:
+        if n in method_map:
+            nodes.append({**method_map[n], **metrics_map.get(n, {})})
+            
+    subgraph = G.subgraph(neighborhood)
+    for u, v, data in subgraph.edges(data=True):
+        edges.append(data)
+
+    return {
+        "root": method_id,
+        "node_count": len(nodes),
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+
 @router.get("/{project_slug}/method/{method_id:path}", response_model=MethodDetailResponse)
-async def get_method_detail(
+def get_method_detail(
     project_slug: str,
     method_id: str,
     service: AnalysisService = Depends(get_service),
@@ -271,7 +554,7 @@ async def get_method_detail(
 
 
 @router.get("/{project_slug}/graph", response_model=dict)
-async def export_graph(
+def export_graph(
     project_slug: str,
     format: str = Query(default="json", enum=["json", "csv"]),
     min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),

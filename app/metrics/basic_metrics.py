@@ -1,3 +1,4 @@
+from __future__ import annotations
 import networkx as nx
 from ..models.analysis_result import MethodMetrics
 from ..models.method_node import MethodNode

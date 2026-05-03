@@ -1,3 +1,4 @@
+from __future__ import annotations
 from enum import Enum
 from pydantic import BaseModel, Field
 
@@ -9,6 +10,8 @@ class CallType(str, Enum):
     CONSTRUCTOR = "constructor"    # ClassName() — resolved to __init__
     MODULE_CALL = "module_call"    # module.func() — resolved via import
     NAME_MATCH = "name_match"      # obj.method() — target matched by name only, type unknown
+    EXTERNAL = "external"          # standard library, built-ins, or external 3p packages
+    DYNAMIC = "dynamic"            # runtime-dispatched: callback(), func(), cls() — provably unresolvable
     UNRESOLVED = "unresolved"      # call target could not be determined at all
 
 

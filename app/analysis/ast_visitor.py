@@ -1,3 +1,4 @@
+from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 from ..models.method_node import MethodNode, ClassNode, ModuleNode, MethodKind
@@ -24,10 +25,11 @@ class ASTVisitor(ast.NodeVisitor):
     Does NOT resolve cross-file calls — that is done in CallResolver.
     """
 
-    def __init__(self, module_id: str, file_path: str, relative_path: str):
+    def __init__(self, module_id: str, file_path: str, relative_path: str, project_dependencies: set[str] = None):
         self.module_id = module_id
         self.file_path = file_path
         self.relative_path = relative_path
+        self.project_dependencies = project_dependencies or set()
         self.scope = ScopeTracker()
         self.result = FileExtractionResult(
             module=ModuleNode(id=module_id, file_path=relative_path)
@@ -65,28 +67,43 @@ class ASTVisitor(ast.NodeVisitor):
             ))
         self.generic_visit(node)
 
+    def _resolve_relative_module(self, level: int, module: str) -> str:
+        """Resolve a relative import (from .foo import bar) to an absolute module path."""
+        if not self.module_id:
+            return module
+        parts = self.module_id.split(".")
+        # level=1 means ".", level=2 means "..", etc.
+        # If level > len(parts), it tries to import above the project root; we max out at 0.
+        keep = max(0, len(parts) - level)
+        base = parts[:keep]
+        if module:
+            base.append(module)
+        return ".".join(base)
+
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         """Handle: from foo import bar, from . import baz"""
         module = node.module or ""
         is_relative = node.level > 0
         imported_names = [alias.name for alias in node.names]
+        
+        target_module = self._resolve_relative_module(node.level, module) if is_relative else module
 
         # Record each imported name in scope
         for alias in node.names:
             local_name = alias.asname or alias.name
-            full_qualified = f"{module}.{alias.name}" if module else alias.name
+            full_qualified = f"{target_module}.{alias.name}" if target_module else alias.name
             self.scope.record_import(local_name, full_qualified)
 
         is_star = imported_names == ["*"]
         if is_star:
-            self.result.module.star_imports.append(module)
+            self.result.module.star_imports.append(target_module)
 
         self.result.imports.append(ImportEdge(
             source_module=self.module_id,
-            target_module=module,
+            target_module=target_module,
             imported_names=imported_names,
             is_relative=is_relative,
-            is_external=self._is_external_module(module),
+            is_external=self._is_external_module(target_module),
         ))
         self.generic_visit(node)
 
@@ -314,7 +331,11 @@ class ASTVisitor(ast.NodeVisitor):
                            "collections", "functools", "itertools", "datetime",
                            "logging", "unittest", "abc", "enum", "dataclasses"}
         root = module.split(".")[0]
-        return root in STDLIB_PREFIXES  # Phase 1: stdlib only; Phase 2: all non-project
+        if root in STDLIB_PREFIXES:
+            return True
+        if root.lower() in self.project_dependencies:
+            return True
+        return False
 
     def _count_loc(self, node) -> int:
         """Count non-blank, non-comment lines in function body."""
