@@ -34,4 +34,6 @@ downloads/
 
 # Temporary & Test Files
 out.log
-test_*.py
+/test_*.py
+/debug_*.py
+/diag_*.py
