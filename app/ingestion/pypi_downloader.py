@@ -132,7 +132,17 @@ def download_and_extract_pypi(package_name: str, download_dir: Path, version: st
                     z.extractall(target_dir)
             else:
                 with tarfile.open(fileobj=tf, mode="r:gz") as tar:
-                    tar.extractall(path=target_dir, filter='data')
+                    # filter='data' requires Python 3.12+; use a compat shim
+                    import sys
+                    if sys.version_info >= (3, 12):
+                        tar.extractall(path=target_dir, filter='data')
+                    else:
+                        # Manual safety check: skip absolute paths and parent traversal
+                        safe_members = [
+                            m for m in tar.getmembers()
+                            if not m.name.startswith('/') and '..' not in m.name
+                        ]
+                        tar.extractall(path=target_dir, members=safe_members)
 
         # Find the actual source root inside the target_dir.
         # For sdist (.tar.gz): typically a single top-level dir  (e.g. requests-2.31.0/)
